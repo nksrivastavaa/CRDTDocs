@@ -1,6 +1,6 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import { DatabaseService } from '@collab/common';
-import type { CommentItem, UserSummary } from '@collab/types';
+import { DatabaseService, RedisService } from '@collab/common';
+import type { CommentItem, CommentRealtimeEvent, UserSummary } from '@collab/types';
 import { NotificationPublisher } from '../notifications/notification.publisher';
 import { PermissionsService } from '../permissions/permissions.service';
 import { CreateCommentDto, ReplyCommentDto } from './comments.dto';
@@ -13,6 +13,10 @@ interface CommentRow {
   email: string;
   display_name: string;
   avatar_url: string | null;
+  resolved_by_user_id: string | null;
+  resolved_by_email: string | null;
+  resolved_by_display_name: string | null;
+  resolved_by_avatar_url: string | null;
   body: string;
   range_from: number;
   range_to: number;
@@ -39,12 +43,26 @@ function mapUser(row: CommentRow): UserSummary {
   };
 }
 
+function mapResolvedBy(row: CommentRow): UserSummary | null {
+  if (!row.resolved_by_user_id || !row.resolved_by_email || !row.resolved_by_display_name) {
+    return null;
+  }
+
+  return {
+    id: row.resolved_by_user_id,
+    email: row.resolved_by_email,
+    displayName: row.resolved_by_display_name,
+    avatarUrl: row.resolved_by_avatar_url,
+  };
+}
+
 function mapComment(row: CommentRow): CommentItem {
   return {
     id: row.id,
     documentId: row.document_id,
     parentId: row.parent_id,
     user: mapUser(row),
+    resolvedBy: mapResolvedBy(row),
     body: row.body,
     rangeFrom: row.range_from,
     rangeTo: row.range_to,
@@ -59,6 +77,7 @@ function mapComment(row: CommentRow): CommentItem {
 export class CommentsService {
   constructor(
     private readonly db: DatabaseService,
+    private readonly redis: RedisService,
     private readonly permissions: PermissionsService,
     private readonly notifications: NotificationPublisher,
   ) {}
@@ -75,6 +94,10 @@ export class CommentsService {
           u.email,
           u.display_name,
           u.avatar_url,
+          resolver.id AS resolved_by_user_id,
+          resolver.email AS resolved_by_email,
+          resolver.display_name AS resolved_by_display_name,
+          resolver.avatar_url AS resolved_by_avatar_url,
           c.body,
           c.range_from,
           c.range_to,
@@ -84,6 +107,7 @@ export class CommentsService {
           c.updated_at
         FROM comments c
         INNER JOIN users u ON u.id = c.user_id
+        LEFT JOIN users resolver ON resolver.id = c.resolved_by
         WHERE c.document_id = $1
         ORDER BY c.created_at ASC
       `,
@@ -111,6 +135,10 @@ export class CommentsService {
           u.email,
           u.display_name,
           u.avatar_url,
+          resolver.id AS resolved_by_user_id,
+          resolver.email AS resolved_by_email,
+          resolver.display_name AS resolved_by_display_name,
+          resolver.avatar_url AS resolved_by_avatar_url,
           c.body,
           c.range_from,
           c.range_to,
@@ -120,6 +148,7 @@ export class CommentsService {
           c.updated_at
         FROM inserted c
         INNER JOIN users u ON u.id = c.user_id
+        LEFT JOIN users resolver ON resolver.id = c.resolved_by
       `,
       [documentId, userId, dto.body, dto.rangeFrom, dto.rangeTo, dto.selectedText ?? null],
     );
@@ -129,7 +158,9 @@ export class CommentsService {
     }
 
     await this.notifyParticipants(userId, documentId, row.id);
-    return mapComment(row);
+    const comment = mapComment(row);
+    await this.publishCommentEvent('created', comment);
+    return comment;
   }
 
   async reply(userId: string, commentId: string, dto: ReplyCommentDto): Promise<CommentItem> {
@@ -163,6 +194,10 @@ export class CommentsService {
           u.email,
           u.display_name,
           u.avatar_url,
+          resolver.id AS resolved_by_user_id,
+          resolver.email AS resolved_by_email,
+          resolver.display_name AS resolved_by_display_name,
+          resolver.avatar_url AS resolved_by_avatar_url,
           c.body,
           c.range_from,
           c.range_to,
@@ -172,6 +207,7 @@ export class CommentsService {
           c.updated_at
         FROM inserted c
         INNER JOIN users u ON u.id = c.user_id
+        LEFT JOIN users resolver ON resolver.id = c.resolved_by
       `,
       [parent.document_id, commentId, userId, dto.body, parent.range_from, parent.range_to, parent.selected_text],
     );
@@ -181,7 +217,9 @@ export class CommentsService {
     }
 
     await this.notifyParticipants(userId, parent.document_id, row.id);
-    return mapComment(row);
+    const comment = mapComment(row);
+    await this.publishCommentEvent('created', comment);
+    return comment;
   }
 
   async resolve(userId: string, commentId: string): Promise<CommentItem> {
@@ -197,7 +235,9 @@ export class CommentsService {
       `
         WITH updated AS (
           UPDATE comments
-          SET resolved_at = COALESCE(resolved_at, now())
+          SET
+            resolved_at = COALESCE(resolved_at, now()),
+            resolved_by = COALESCE(resolved_by, $2)
           WHERE id = $1
           RETURNING *
         )
@@ -209,6 +249,10 @@ export class CommentsService {
           u.email,
           u.display_name,
           u.avatar_url,
+          resolver.id AS resolved_by_user_id,
+          resolver.email AS resolved_by_email,
+          resolver.display_name AS resolved_by_display_name,
+          resolver.avatar_url AS resolved_by_avatar_url,
           c.body,
           c.range_from,
           c.range_to,
@@ -218,15 +262,26 @@ export class CommentsService {
           c.updated_at
         FROM updated c
         INNER JOIN users u ON u.id = c.user_id
+        LEFT JOIN users resolver ON resolver.id = c.resolved_by
       `,
-      [commentId],
+      [commentId, userId],
     );
 
     if (!row) {
       throw new NotFoundException('Comment not found');
     }
 
-    return mapComment(row);
+    const comment = mapComment(row);
+    await this.publishCommentEvent('resolved', comment);
+    return comment;
+  }
+
+  private async publishCommentEvent(type: CommentRealtimeEvent['type'], comment: CommentItem): Promise<void> {
+    await this.redis.publishJson('comments:events', {
+      type,
+      documentId: comment.documentId,
+      comment,
+    } satisfies CommentRealtimeEvent);
   }
 
   private async notifyParticipants(actorId: string, documentId: string, commentId: string): Promise<void> {

@@ -1,4 +1,4 @@
-import { Logger } from '@nestjs/common';
+import { Logger, OnModuleDestroy } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import {
   ConnectedSocket,
@@ -10,10 +10,11 @@ import {
   WebSocketGateway,
   WebSocketServer,
 } from '@nestjs/websockets';
-import { Server, Socket } from 'socket.io';
+import { Namespace, Server, Socket } from 'socket.io';
 import { createAdapter } from '@socket.io/redis-adapter';
+import { createClient } from 'redis';
 import { DatabaseService, RedisService, env, hasDocumentRole } from '@collab/common';
-import type { CollaboratorPresence, DocumentRole, JwtPayload } from '@collab/types';
+import type { CollaboratorPresence, CommentRealtimeEvent, DocumentRole, JwtPayload } from '@collab/types';
 import { CollaborationPermissionsService } from './collaboration-permissions.service';
 import { DocumentSessionService } from './document-session.service';
 
@@ -45,16 +46,33 @@ type ClientSocket = Socket & {
 };
 
 const PRESENCE_COLORS = ['#1f7a5c', '#d1495b', '#edae49', '#3066be', '#6a4c93', '#2a9d8f', '#e76f51', '#264653'];
+const COMMENTS_EVENTS_CHANNEL = 'comments:events';
 
 @WebSocketGateway({
   namespace: '/collaboration',
   cors: { origin: '*', credentials: true },
 })
-export class CollaborationGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect {
+export class CollaborationGateway implements OnGatewayInit, OnGatewayConnection, OnGatewayDisconnect, OnModuleDestroy {
   @WebSocketServer()
   private server!: Server;
 
   private readonly logger = new Logger(CollaborationGateway.name);
+  private adapterPublisher?: ReturnType<typeof createClient>;
+  private adapterSubscriber?: ReturnType<typeof createClient>;
+  private commentsSubscriber?: ReturnType<typeof createClient>;
+  private readonly handleCommentEvent = (message: string): void => {
+    try {
+      const event = JSON.parse(message) as CommentRealtimeEvent;
+
+      if (!event.documentId || !event.comment) {
+        return;
+      }
+
+      this.server.to(this.room(event.documentId)).emit('comment:upsert', event);
+    } catch (error) {
+      this.logger.warn(`Unable to fan out comment event: ${(error as Error).message}`);
+    }
+  };
 
   constructor(
     private readonly jwtService: JwtService,
@@ -64,9 +82,27 @@ export class CollaborationGateway implements OnGatewayInit, OnGatewayConnection,
     private readonly sessions: DocumentSessionService,
   ) {}
 
-  afterInit(server: Server): void {
-    this.server.adapter(createAdapter(this.redis.getPublisher(), this.redis.getSubscriber()));
+  async afterInit(server: Server | Namespace): Promise<void> {
+    const rootServer = typeof (server as Server).adapter === 'function' ? (server as Server) : (server as Namespace).server;
+    const redisUrl = env('REDIS_URL', 'redis://localhost:6379');
+    const publisher = createClient({ url: redisUrl });
+    const subscriber = publisher.duplicate();
+    const commentsSubscriber = createClient({ url: redisUrl });
+
+    await Promise.all([publisher.connect(), subscriber.connect(), commentsSubscriber.connect()]);
+    rootServer.adapter(createAdapter(publisher, subscriber));
+    await commentsSubscriber.subscribe(COMMENTS_EVENTS_CHANNEL, this.handleCommentEvent);
+
+    this.adapterPublisher = publisher;
+    this.adapterSubscriber = subscriber;
+    this.commentsSubscriber = commentsSubscriber;
+
     this.logger.log('Socket.IO Redis adapter initialized');
+  }
+
+  async onModuleDestroy(): Promise<void> {
+    await this.commentsSubscriber?.unsubscribe(COMMENTS_EVENTS_CHANNEL).catch(() => undefined);
+    await Promise.allSettled([this.adapterPublisher?.quit(), this.adapterSubscriber?.quit(), this.commentsSubscriber?.quit()]);
   }
 
   handleConnection(socket: ClientSocket): void {

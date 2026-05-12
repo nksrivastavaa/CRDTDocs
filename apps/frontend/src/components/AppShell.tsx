@@ -1,8 +1,9 @@
 import { FileText, LogOut, Plus, Search } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
-import { ReactNode } from 'react';
+import { ReactNode, useState } from 'react';
 import { useAuth } from '../auth/AuthContext';
 import { NotificationBell } from './NotificationBell';
+import { SearchDialog } from './SearchDialog';
 
 export function AppShell({
   children,
@@ -15,6 +16,7 @@ export function AppShell({
 }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const [searchOpen, setSearchOpen] = useState(false);
 
   return (
     <div className="app-shell">
@@ -23,10 +25,10 @@ export function AppShell({
           <FileText size={20} />
           <span>Collab</span>
         </Link>
-        <div className="sidebar-search">
+        <button className="sidebar-search" type="button" onClick={() => setSearchOpen(true)}>
           <Search size={16} />
           <span>Search</span>
-        </div>
+        </button>
         <button className="sidebar-button" type="button" onClick={() => navigate('/')}>
           <Plus size={16} />
           <span>Workspace</span>
@@ -53,6 +55,7 @@ export function AppShell({
         </header>
         {children}
       </main>
+      <SearchDialog open={searchOpen} onClose={() => setSearchOpen(false)} onNavigate={navigate} />
     </div>
   );
 }

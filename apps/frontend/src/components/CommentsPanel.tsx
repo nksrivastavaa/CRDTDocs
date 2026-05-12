@@ -94,6 +94,15 @@ export function CommentsPanel({
                 </button>
               ) : null}
             </div>
+            {comment.resolvedAt ? (
+              <div className="comment-resolution">
+                <Check size={14} />
+                <span>
+                  Resolved by {comment.resolvedBy?.displayName ?? 'Unknown user'} on{' '}
+                  {new Date(comment.resolvedAt).toLocaleString()}
+                </span>
+              </div>
+            ) : null}
             {(replies.get(comment.id) ?? []).map((reply) => (
               <div className="reply" key={reply.id}>
                 <strong>{reply.user.displayName}</strong>

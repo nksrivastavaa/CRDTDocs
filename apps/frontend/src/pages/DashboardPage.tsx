@@ -65,7 +65,7 @@ export function DashboardPage() {
               <Link className="workspace-row" key={workspace.id} to={`/workspaces/${workspace.id}`}>
                 <div>
                   <strong>{workspace.name}</strong>
-                  <span>{workspace.role}</span>
+                  <span>{workspace.accessType === 'shared' ? 'shared with me' : workspace.role}</span>
                 </div>
                 <ArrowRight size={17} />
               </Link>

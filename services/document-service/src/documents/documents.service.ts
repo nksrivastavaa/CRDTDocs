@@ -101,7 +101,7 @@ export class DocumentsService {
   }
 
   async listByWorkspace(userId: string, workspaceId: string): Promise<DocumentSummary[]> {
-    await this.permissions.assertWorkspaceMember(userId, workspaceId);
+    await this.permissions.assertWorkspaceAccess(userId, workspaceId);
 
     const result = await this.db.query<DocumentRow>(
       `
@@ -127,6 +127,7 @@ export class DocumentsService {
         LEFT JOIN document_permissions dp ON dp.document_id = d.id AND dp.user_id = $2
         WHERE d.workspace_id = $1
           AND d.is_deleted = false
+          AND (wm.user_id IS NOT NULL OR dp.user_id IS NOT NULL OR d.owner_id = $2)
         ORDER BY d.updated_at DESC
       `,
       [workspaceId, userId],

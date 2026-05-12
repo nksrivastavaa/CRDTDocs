@@ -9,8 +9,9 @@ interface WorkspaceRow {
   id: string;
   name: string;
   owner_id: string;
-  invite_code: string;
+  invite_code: string | null;
   role: 'owner' | 'admin' | 'member';
+  access_type?: 'member' | 'shared';
   created_at: string | Date;
   updated_at: string | Date;
 }
@@ -20,8 +21,9 @@ function mapWorkspace(row: WorkspaceRow): WorkspaceSummary {
     id: row.id,
     name: row.name,
     ownerId: row.owner_id,
-    inviteCode: row.invite_code,
+    inviteCode: row.invite_code ?? undefined,
     role: row.role,
+    accessType: row.access_type ?? 'member',
     createdAt: new Date(row.created_at).toISOString(),
     updatedAt: new Date(row.updated_at).toISOString(),
   };
@@ -61,11 +63,30 @@ export class WorkspacesService {
   async list(userId: string): Promise<WorkspaceSummary[]> {
     const result = await this.db.query<WorkspaceRow>(
       `
-        SELECT w.id, w.name, w.owner_id, w.invite_code, wm.role, w.created_at, w.updated_at
+        SELECT w.id, w.name, w.owner_id, w.invite_code, wm.role, 'member' AS access_type, w.created_at, w.updated_at
         FROM workspaces w
         INNER JOIN workspace_members wm ON wm.workspace_id = w.id
         WHERE wm.user_id = $1
-        ORDER BY w.updated_at DESC
+
+        UNION
+
+        SELECT
+          w.id,
+          w.name,
+          w.owner_id,
+          NULL::text AS invite_code,
+          'member'::workspace_role AS role,
+          'shared' AS access_type,
+          w.created_at,
+          MAX(d.updated_at) AS updated_at
+        FROM workspaces w
+        INNER JOIN documents d ON d.workspace_id = w.id AND d.is_deleted = false
+        INNER JOIN document_permissions dp ON dp.document_id = d.id AND dp.user_id = $1
+        LEFT JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = $1
+        WHERE wm.user_id IS NULL
+        GROUP BY w.id, w.name, w.owner_id, w.created_at
+
+        ORDER BY updated_at DESC
       `,
       [userId],
     );
@@ -74,14 +95,31 @@ export class WorkspacesService {
   }
 
   async get(userId: string, workspaceId: string): Promise<WorkspaceSummary> {
-    await this.permissions.assertWorkspaceMember(userId, workspaceId);
-
     const row = await this.db.one<WorkspaceRow>(
       `
-        SELECT w.id, w.name, w.owner_id, w.invite_code, wm.role, w.created_at, w.updated_at
+        SELECT
+          w.id,
+          w.name,
+          w.owner_id,
+          CASE WHEN wm.user_id IS NULL THEN NULL ELSE w.invite_code END AS invite_code,
+          COALESCE(wm.role, 'member'::workspace_role) AS role,
+          CASE WHEN wm.user_id IS NULL THEN 'shared' ELSE 'member' END AS access_type,
+          w.created_at,
+          w.updated_at
         FROM workspaces w
-        INNER JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = $2
+        LEFT JOIN workspace_members wm ON wm.workspace_id = w.id AND wm.user_id = $2
         WHERE w.id = $1
+          AND (
+            wm.user_id IS NOT NULL
+            OR EXISTS (
+              SELECT 1
+              FROM documents d
+              INNER JOIN document_permissions dp ON dp.document_id = d.id
+              WHERE d.workspace_id = w.id
+                AND d.is_deleted = false
+                AND dp.user_id = $2
+            )
+          )
       `,
       [workspaceId, userId],
     );

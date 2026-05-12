@@ -6,6 +6,10 @@ interface WorkspaceMemberRow {
   role: WorkspaceRole;
 }
 
+interface WorkspaceAccessRow {
+  has_access: boolean;
+}
+
 interface DocumentAccessRow {
   owner_id: string;
   workspace_role: WorkspaceRole | null;
@@ -37,6 +41,43 @@ export class PermissionsService {
     }
 
     return role;
+  }
+
+  async hasWorkspaceAccess(userId: string, workspaceId: string): Promise<boolean> {
+    const row = await this.db.one<WorkspaceAccessRow>(
+      `
+        SELECT EXISTS (
+          SELECT 1
+          FROM workspaces w
+          WHERE w.id = $1
+            AND (
+              EXISTS (
+                SELECT 1
+                FROM workspace_members wm
+                WHERE wm.workspace_id = w.id
+                  AND wm.user_id = $2
+              )
+              OR EXISTS (
+                SELECT 1
+                FROM documents d
+                INNER JOIN document_permissions dp ON dp.document_id = d.id
+                WHERE d.workspace_id = w.id
+                  AND d.is_deleted = false
+                  AND dp.user_id = $2
+              )
+            )
+        ) AS has_access
+      `,
+      [workspaceId, userId],
+    );
+
+    return Boolean(row?.has_access);
+  }
+
+  async assertWorkspaceAccess(userId: string, workspaceId: string): Promise<void> {
+    if (!(await this.hasWorkspaceAccess(userId, workspaceId))) {
+      throw new ForbiddenException('You do not have access to this workspace');
+    }
   }
 
   async assertWorkspaceAdmin(userId: string, workspaceId: string): Promise<WorkspaceRole> {

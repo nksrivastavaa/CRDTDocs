@@ -13,6 +13,8 @@ export function WorkspacePage() {
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [title, setTitle] = useState('');
   const [inviteCode, setInviteCode] = useState<string | null>(null);
+  const canCreateDocuments = workspace?.accessType !== 'shared';
+  const canManageInvite = workspace?.role === 'owner' || workspace?.role === 'admin';
 
   useEffect(() => {
     if (!token || !workspaceId) {
@@ -69,29 +71,33 @@ export function WorkspacePage() {
           </div>
         </div>
         <aside className="workspace-side">
-          <form className="panel stack-form" onSubmit={createDocument}>
-            <div className="panel-heading">
-              <h2>New document</h2>
+          {canCreateDocuments ? (
+            <form className="panel stack-form" onSubmit={createDocument}>
+              <div className="panel-heading">
+                <h2>New document</h2>
+              </div>
+              <label>
+                Title
+                <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Untitled" />
+              </label>
+              <button className="primary-button" type="submit">
+                <Plus size={16} />
+                Create
+              </button>
+            </form>
+          ) : null}
+          {canManageInvite ? (
+            <div className="panel stack-form">
+              <div className="panel-heading">
+                <h2>Invite</h2>
+              </div>
+              <div className="invite-code">{inviteCode ?? 'No invite available'}</div>
+              <button className="secondary-button" type="button" onClick={refreshInvite}>
+                <Copy size={16} />
+                Rotate invite
+              </button>
             </div>
-            <label>
-              Title
-              <input value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Untitled" />
-            </label>
-            <button className="primary-button" type="submit">
-              <Plus size={16} />
-              Create
-            </button>
-          </form>
-          <div className="panel stack-form">
-            <div className="panel-heading">
-              <h2>Invite</h2>
-            </div>
-            <div className="invite-code">{inviteCode ?? 'No invite available'}</div>
-            <button className="secondary-button" type="button" onClick={refreshInvite}>
-              <Copy size={16} />
-              Rotate invite
-            </button>
-          </div>
+          ) : null}
         </aside>
       </section>
     </AppShell>

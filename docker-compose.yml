@@ -52,7 +52,7 @@ services:
       mc mb -p local/${AWS_S3_BUCKET:-collab-uploads} || true;
       mc anonymous set download local/${AWS_S3_BUCKET:-collab-uploads};
       printf '[{\"AllowedOrigins\":[\"*\"],\"AllowedMethods\":[\"GET\",\"PUT\",\"POST\"],\"AllowedHeaders\":[\"*\"],\"ExposeHeaders\":[\"ETag\"],\"MaxAgeSeconds\":3000}]' > /tmp/cors.json;
-      mc cors set /tmp/cors.json local/${AWS_S3_BUCKET:-collab-uploads};
+      mc cors set local/${AWS_S3_BUCKET:-collab-uploads} /tmp/cors.json;
       "
 
   auth-service:

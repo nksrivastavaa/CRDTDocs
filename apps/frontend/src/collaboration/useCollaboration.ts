@@ -2,17 +2,26 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { io, Socket } from 'socket.io-client';
 import * as Y from 'yjs';
 import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate } from 'y-protocols/awareness';
-import type { CollaboratorPresence, DocumentRole, UserSummary } from '@collab/types';
+import type { CollaboratorPresence, CommentRealtimeEvent, DocumentRole, UserSummary } from '@collab/types';
 
 const WS_URL = (import.meta.env.VITE_WS_URL as string | undefined) ?? 'http://localhost:3003';
 const COLORS = ['#1f7a5c', '#d1495b', '#edae49', '#3066be', '#6a4c93', '#2a9d8f', '#e76f51'];
+
+interface CollaborationOptions {
+  onCommentUpsert?: (event: CommentRealtimeEvent) => void;
+}
 
 function colorForUser(userId: string): string {
   const hash = [...userId].reduce((total, char) => total + char.charCodeAt(0), 0);
   return COLORS[hash % COLORS.length];
 }
 
-export function useCollaboration(documentId: string | undefined, token: string | null, user: UserSummary | null) {
+export function useCollaboration(
+  documentId: string | undefined,
+  token: string | null,
+  user: UserSummary | null,
+  options: CollaborationOptions = {},
+) {
   const ydoc = useMemo(() => new Y.Doc(), [documentId]);
   const awareness = useMemo(() => new Awareness(ydoc), [ydoc]);
   const provider = useMemo(() => ({ awareness }), [awareness]);
@@ -21,10 +30,15 @@ export function useCollaboration(documentId: string | undefined, token: string |
   const [role, setRole] = useState<DocumentRole | null>(null);
   const [collaborators, setCollaborators] = useState<CollaboratorPresence[]>([]);
   const roleRef = useRef<DocumentRole | null>(null);
+  const onCommentUpsertRef = useRef<CollaborationOptions['onCommentUpsert']>(options.onCommentUpsert);
 
   useEffect(() => {
     roleRef.current = role;
   }, [role]);
+
+  useEffect(() => {
+    onCommentUpsertRef.current = options.onCommentUpsert;
+  }, [options.onCommentUpsert]);
 
   useEffect(() => {
     if (!documentId || !token || !user) {
@@ -107,6 +121,12 @@ export function useCollaboration(documentId: string | undefined, token: string |
 
     socket.on('presence:users', (users: CollaboratorPresence[]) => {
       setCollaborators(users);
+    });
+
+    socket.on('comment:upsert', (event: CommentRealtimeEvent) => {
+      if (event.documentId === documentId) {
+        onCommentUpsertRef.current?.(event);
+      }
     });
 
     socket.on('collaboration:error', (payload: { message: string }) => {

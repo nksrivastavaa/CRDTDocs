@@ -73,9 +73,13 @@ CREATE TABLE IF NOT EXISTS comments (
   range_to INTEGER NOT NULL DEFAULT 0,
   selected_text TEXT,
   resolved_at TIMESTAMPTZ,
+  resolved_by UUID REFERENCES users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+ALTER TABLE IF EXISTS comments
+  ADD COLUMN IF NOT EXISTS resolved_by UUID REFERENCES users(id) ON DELETE SET NULL;
 
 CREATE TABLE IF NOT EXISTS notifications (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

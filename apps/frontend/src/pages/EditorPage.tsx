@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { EditorContent, useEditor } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
@@ -7,8 +7,8 @@ import Collaboration from '@tiptap/extension-collaboration';
 import CollaborationCursor from '@tiptap/extension-collaboration-cursor';
 import Link from '@tiptap/extension-link';
 import { ArrowLeft, Eye, MessageSquare, Pencil, Share2, Trash2 } from 'lucide-react';
-import type { CommentItem, DocumentDetail, FileAttachment } from '@collab/types';
-import { api } from '../api/client';
+import type { CommentItem, CommentRealtimeEvent, DocumentDetail, FileAttachment } from '@collab/types';
+import { ApiError, api } from '../api/client';
 import { useAuth } from '../auth/AuthContext';
 import { useCollaboration } from '../collaboration/useCollaboration';
 import { AppShell } from '../components/AppShell';
@@ -22,17 +22,33 @@ export function EditorPage() {
   const navigate = useNavigate();
   const { token, user } = useAuth();
   const [document, setDocument] = useState<DocumentDetail | null>(null);
+  const [loadingDocument, setLoadingDocument] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [title, setTitle] = useState('');
   const [comments, setComments] = useState<CommentItem[]>([]);
   const [files, setFiles] = useState<FileAttachment[]>([]);
   const [shareOpen, setShareOpen] = useState(false);
+  const [editMode, setEditMode] = useState(true);
   const [selection, setSelection] = useState<ActiveSelection>({ from: 0, to: 0, text: '' });
   const initializedDocuments = useRef(new Set<string>());
   const saveTimer = useRef<number | null>(null);
 
-  const collaboration = useCollaboration(documentId, token, user);
+  const upsertComment = useCallback((comment: CommentItem) => {
+    setComments((items) => {
+      const index = items.findIndex((item) => item.id === comment.id);
+
+      if (index === -1) {
+        return [...items, comment];
+      }
+
+      return items.map((item) => (item.id === comment.id ? comment : item));
+    });
+  }, []);
+  const handleCommentUpsert = useCallback((event: CommentRealtimeEvent) => upsertComment(event.comment), [upsertComment]);
+  const collaboration = useCollaboration(document ? documentId : undefined, token, user, { onCommentUpsert: handleCommentUpsert });
   const effectiveRole = collaboration.role ?? document?.role ?? null;
-  const canEdit = collaboration.synced && (effectiveRole === 'owner' || effectiveRole === 'editor');
+  const hasEditAccess = effectiveRole === 'owner' || effectiveRole === 'editor';
+  const canEdit = collaboration.synced && hasEditAccess && editMode;
   const canShare = effectiveRole === 'owner';
 
   const editor = useEditor(
@@ -67,14 +83,51 @@ export function EditorPage() {
       return;
     }
 
-    void Promise.all([api.getDocument(token, documentId), api.listComments(token, documentId), api.listFiles(token, documentId)]).then(
-      ([doc, commentItems, fileItems]) => {
+    let cancelled = false;
+    setDocument(null);
+    setTitle('');
+    setComments([]);
+    setFiles([]);
+    setLoadError(null);
+    setLoadingDocument(true);
+
+    void Promise.all([api.getDocument(token, documentId), api.listComments(token, documentId), api.listFiles(token, documentId)])
+      .then(([doc, commentItems, fileItems]) => {
+        if (cancelled) {
+          return;
+        }
+
         setDocument(doc);
         setTitle(doc.title);
         setComments(commentItems);
         setFiles(fileItems);
-      },
-    );
+      })
+      .catch((error: unknown) => {
+        if (cancelled) {
+          return;
+        }
+
+        if (error instanceof ApiError && error.statusCode === 403) {
+          setLoadError('You do not have access to this document. Ask the owner to share it with you.');
+          return;
+        }
+
+        if (error instanceof ApiError && error.statusCode === 404) {
+          setLoadError('This document could not be found. It may have been deleted or the link may be wrong.');
+          return;
+        }
+
+        setLoadError('Unable to load this document right now.');
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingDocument(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, [documentId, token]);
 
   useEffect(() => {
@@ -143,12 +196,16 @@ export function EditorPage() {
   }, [canEdit, document, editor, token]);
 
   const statusLabel = useMemo(() => {
-    if (!canEdit) {
+    if (!hasEditAccess) {
       return 'View only';
     }
 
-    return collaboration.status === 'connected' ? 'Live' : 'Offline';
-  }, [canEdit, collaboration.status]);
+    if (!collaboration.synced) {
+      return collaboration.status === 'offline' ? 'Offline' : 'Connecting';
+    }
+
+    return editMode ? 'Editing live' : 'Viewing';
+  }, [collaboration.status, collaboration.synced, editMode, hasEditAccess]);
 
   async function saveTitle() {
     if (!token || !document || !canEdit || title.trim() === document.title) {
@@ -180,7 +237,7 @@ export function EditorPage() {
       rangeTo: selection.to,
       selectedText: selection.text,
     });
-    setComments((items) => [...items, comment]);
+    upsertComment(comment);
   }
 
   async function replyComment(commentId: string, body: string) {
@@ -189,7 +246,7 @@ export function EditorPage() {
     }
 
     const reply = await api.replyComment(token, commentId, body);
-    setComments((items) => [...items, reply]);
+    upsertComment(reply);
   }
 
   async function resolveComment(commentId: string) {
@@ -198,13 +255,24 @@ export function EditorPage() {
     }
 
     const resolved = await api.resolveComment(token, commentId);
-    setComments((items) => items.map((item) => (item.id === resolved.id ? resolved : item)));
+    upsertComment(resolved);
   }
 
-  if (!documentId || !document) {
+  if (!documentId || loadingDocument || loadError || !document) {
     return (
       <AppShell title="Document">
-        <div className="boot-screen">Loading document</div>
+        {loadError ? (
+          <section className="access-state">
+            <h2>Document unavailable</h2>
+            <p>{loadError}</p>
+            <button className="secondary-button" type="button" onClick={() => navigate('/')}>
+              <ArrowLeft size={16} />
+              Back to workspaces
+            </button>
+          </section>
+        ) : (
+          <div className="boot-screen">Loading document</div>
+        )}
       </AppShell>
     );
   }
@@ -216,6 +284,17 @@ export function EditorPage() {
         <>
           <Collaborators collaborators={collaboration.collaborators} />
           <span className={canEdit ? 'status-pill live' : 'status-pill'}>{statusLabel}</span>
+          {hasEditAccess ? (
+            <button
+              className="secondary-button"
+              type="button"
+              disabled={!collaboration.synced}
+              onClick={() => setEditMode((value) => !value)}
+            >
+              {editMode ? <Eye size={16} /> : <Pencil size={16} />}
+              {editMode ? 'View' : 'Edit'}
+            </button>
+          ) : null}
           {canShare ? (
             <button className="secondary-button" type="button" onClick={() => setShareOpen(true)}>
               <Share2 size={16} />

@@ -24,6 +24,7 @@ export interface WorkspaceSummary {
   id: string;
   name: string;
   role: WorkspaceRole;
+  accessType?: 'member' | 'shared';
   ownerId: string;
   inviteCode?: string;
   createdAt: string;
@@ -56,6 +57,7 @@ export interface CommentItem {
   documentId: string;
   parentId?: string | null;
   user: UserSummary;
+  resolvedBy?: UserSummary | null;
   body: string;
   rangeFrom: number;
   rangeTo: number;
@@ -63,6 +65,12 @@ export interface CommentItem {
   resolvedAt?: string | null;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface CommentRealtimeEvent {
+  type: 'created' | 'updated' | 'resolved';
+  documentId: string;
+  comment: CommentItem;
 }
 
 export interface NotificationItem {
